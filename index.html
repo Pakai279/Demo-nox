@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🥊 وحوش الكاميرا - Camera Monster Fighter</title>
+    <style>
+        body { margin: 0; background: #0a0a0a; color: #eee; font-family: 'Segoe UI', Tahoma, sans-serif; display: flex; flex-direction: column; align-items: center; min-height: 100vh; }
+        #game-container { display: flex; width: 95%; max-width: 1100px; margin-top: 20px; gap: 20px; flex-wrap: wrap; justify-content: center; }
+        #camera-container { position: relative; width: 100%; max-width: 640px; height: auto; aspect-ratio: 4/3; background: #000; border-radius: 16px; overflow: hidden; border: 3px solid #333; box-shadow: 0 0 25px rgba(0,0,0,0.8); }
+        #webcam, #output_canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; transform: scaleX(-1); object-fit: cover; }
+        #webcam { z-index: 1; }
+        #output_canvas { z-index: 2; pointer-events: none; }
+        #ui-panel { width: 100%; max-width: 400px; background: #1a1a1a; padding: 20px; border-radius: 16px; border: 1px solid #333; display: flex; flex-direction: column; gap: 15px; }
+        .hp-bar-container { width: 100%; background: #333; border-radius: 8px; height: 25px; overflow: hidden; margin-bottom: 5px; }
+        .hp-bar { height: 100%; transition: width 0.2s; }
+        #player-hp { background: linear-gradient(90deg, #00c853, #69f0ae); width: 100%; }
+        #monster-hp { background: linear-gradient(90deg, #d50000, #ff1744); width: 100%; }
+        .stats { display: flex; justify-content: space-between; font-weight: bold; }
+        #monster-display { text-align: center; margin: 20px 0; min-height: 150px; display: flex; align-items: center; justify-content: center; }
+        #monster-img { max-width: 120px; max-height: 120px; transition: transform 0.2s; image-rendering: pixelated; }
+        #combo-prompt { font-size: 24px; text-align: center; min-height: 40px; color: #ffcc00; font-weight: bold; letter-spacing: 2px; }
+        #combo-prompt .done { color: #00c853; }
+        #combo-prompt .pending { color: #555; }
+        #message-log { text-align: center; min-height: 30px; color: #aaa; }
+        .controls-info { font-size: 14px; color: #888; text-align: center; margin-top: 10px; }
+        button { padding: 15px; font-size: 18px; font-weight: bold; border: none; border-radius: 12px; cursor: pointer; background: #ffcc00; color: #111; transition: 0.2s; }
+        button:hover { background: #ffe082; }
+        .hidden { display: none !important; }
+    </style>
+    <!-- استيراد مكتبة MediaPipe -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/vision_bundle.mjs" crossorigin="anonymous"></script>
+</head>
+<body>
+
+    <h1 style="text-align:center; color:#ffcc00;">🥊 وحوش الكاميرا</h1>
+
+    <div id="game-container">
+        <!-- الكاميرا -->
+        <div id="camera-container">
+            <video id="webcam" autoplay playsinline></video>
+            <canvas id="output_canvas"></canvas>
+        </div>
+
+        <!-- لوحة التحكم -->
+        <div id="ui-panel">
+            <div>
+                <div class="stats"><span>HP ديالك:</span> <span id="player-hp-text">100</span></div>
+                <div class="hp-bar-container"><div id="player-hp" class="hp-bar"></div></div>
+            </div>
+            <div>
+                <div class="stats"><span>HP ديال الوحش:</span> <span id="monster-hp-text">100</span></div>
+                <div class="hp-bar-container"><div id="monster-hp" class="hp-bar"></div></div>
+            </div>
+            
+            <div id="monster-display">
+                <img id="monster-img" src="" alt="Monster">
+                <span id="monster-name" style="font-size: 20px; margin-right: 15px;"></span>
+            </div>
+
+            <div id="combo-prompt"></div>
+            <div id="message-log">وقّف قدام الكاميرا وضرب!</div>
+
+            <button id="start-btn">بدء اللعبة</button>
+            <div class="controls-info">دير الحركات بيديك قدام الكاميرا: Jab (يمين/يسار)، Cross، Up (أببركوت)، Cut (هوك)</div>
+        </div>
+    </div>
+
+<script type="module">
+    import { PoseLandmarker, FilesetResolver, DrawingUtils } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/vision_bundle.mjs";
+
+    // --- 1. إعدادات اللعبة ---
+    const CONFIG = {
+        comboSequence: ['jab', 'cross', 'up', 'cut'], // الترتيب المطلوب
+        playerMaxHP: 100,
+        monsterMaxHP: 100,
+        baseMonsterDamage: 5,
+        levelMultiplier: 1.2,
+        monsterImages: [
+            'https://opengameart.org/sites/default/files/styles/medium/public/monster_0.png', // استبدل بروابط صورك
+            'https://opengameart.org/sites/default/files/styles/medium/public/monster_1.png',
+            'https://opengameart.org/sites/default/files/styles/medium/public/monster_2.png'
+        ]
+    };
+
+    // --- 2. عناصر DOM ---
+    const video = document.getElementById('webcam');
+    const canvasElement = document.getElementById('output_canvas');
+    const canvasCtx = canvasElement.getContext('2d');
+    const startBtn = document.getElementById('start-btn');
+    const playerHpBar = document.getElementById('player-hp');
+    const playerHpText = document.getElementById('player-hp-text');
+    const monsterHpBar = document.getElementById('monster-hp');
+    const monsterHpText = document.getElementById('monster-hp-text');
+    const comboPrompt = document.getElementById('combo-prompt');
+    const messageLog = document.getElementById('message-log');
+    const monsterImg = document.getElementById('monster-img');
+    const monsterNameSpan = document.getElementById('monster-name');
+
+    // --- 3. حالة اللعبة ---
+    let gameState = 'idle'; // idle, playing, gameover
+    let playerHP = CONFIG.playerMaxHP;
+    let monsterHP = CONFIG.monsterMaxHP;
+    let currentLevel = 1;
+    let comboIndex = 0;
+    let isProcessingPunch = false; // لمنع تسجيل نفس الحركة مرتين
+    
+    // --- 4. متغيرات MediaPipe ---
+    let poseLandmarker;
+    let lastVideoTime = -1;
+    let landmarkHistory = []; // لتخزين تاريخ النقاط لحساب السرعة
+    const HISTORY_SIZE = 5; // عدد الإطارات لحساب السرعة
+
+    // --- 5. دوال مساعدة ---
+    function calculateAngle(p1, p2, p3) {
+        // حساب الزاوية بين 3 نقاط (p2 هي الرأس)
+        const v1 = { x: p1.x - p2.x, y: p1.y - p2.y };
+        const v2 = { x: p3.x - p2.x, y: p3.y - p2.y };
+        const dot = v1.x * v2.x + v1.y * v2.y;
+        const mag1 = Math.sqrt(v1.x * v1.x + v1.y * v1.y);
+        const mag2 = Math.sqrt(v2.x * v2.x + v2.y * v2.y);
+        if (mag1 === 0 || mag2 === 0) return 0;
+        const cos = dot / (mag1 * mag2);
+        // تصحيح القيمة لتكون بين -1 و 1
+        const clampedCos = Math.max(-1, Math.min(1, cos));
+        return Math.acos(clampedCos) * (180 / Math.PI);
+    }
+
+    function getDistance(p1, p2) {
+        return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2) + Math.pow(p1.z - p2.z, 2));
+    }
+
+    // --- 6. تهيئة MediaPipe والكاميرا ---
+    async function initMediaPipe() {
+        const vision = await FilesetResolver.forVisionTasks(
+            "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm"
+        );
+        poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
+            baseOptions: {
+                modelAssetPath: `https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task`,
+                delegate: "GPU"
+            },
+            runningMode: "VIDEO",
+            numPoses: 1
+        });
+        console.log("Pose Landmarker ready.");
+    }
+
+    async function startCamera() {
+        if (poseLandmarker) {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                video.srcObject = stream;
+                video.addEventListener("loadeddata", predictWebcam);
+            } catch (err) {
+                console.error("Camera error:", err);
+                messageLog.textContent = "ما قدرناش نشغلو الكاميرا. عافاك سمح بالدخول للكاميرا.";
+            }
+        }
+    }
+
+    // --- 7. حلقة التحليل الرئيسية ---
+    async function predictWebcam() {
+        if (gameState === 'gameover') return;
+
+        canvasElement.width = video.videoWidth;
+        canvasElement.height = video.videoHeight;
+        
+        let startTimeMs = performance.now();
+        if (lastVideoTime !== video.currentTime) {
+            lastVideoTime = video.currentTime;
+            const results = poseLandmarker.detectForVideo(video, startTimeMs);
+            
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            
+            if (results.landmarks && results.landmarks.length > 0) {
+                const landmarks = results.landmarks[0];
+                
+                // رسم الهيكل العظمي
+                drawSkeleton(landmarks, canvasCtx);
+
+                // تحليل الحركة (فقط إلا كانت اللعبة خدامة)
+                if (gameState === 'playing') {
+                    analyzePunch(landmarks);
+                }
+            }
+        }
+        requestAnimationFrame(predictWebcam);
+    }
+
+    function drawSkeleton(landmarks, ctx) {
+        const drawingUtils = new DrawingUtils(ctx);
+        drawingUtils.drawLandmarks(landmarks, { radius: 4, color: '#ffcc00', fillColor: '#fff' });
+        drawingUtils.drawConnectors(landmarks, PoseLandmarker.POSE_CONNECTIONS, { color: '#00c853', lineWidth: 2 });
+    }
+
+    // --- 8. خوارزمية اكتشاف الحركات ---
+    function analyzePunch(landmarks) {
+        if (isProcessingPunch) return;
+
+        // النقاط المهمة (حسب ترتيب MediaPipe)
+        const leftShoulder = landmarks[11], rightShoulder = landmarks[12];
+        const leftElbow = landmarks[13], rightElbow = landmarks[14];
+        const leftWrist = landmarks[15], rightWrist = landmarks[16];
+        const leftHip = landmarks[23], rightHip = landmarks[24];
+
+        // إضافة النقاط الحالية للتاريخ
+        landmarkHistory.push({ leftWrist, rightWrist, leftElbow, rightElbow, leftShoulder, rightShoulder, timestamp: performance.now() });
+        if (landmarkHistory.length > HISTORY_SIZE) landmarkHistory.shift();
+
+        if (landmarkHistory.length < 2) return;
+
+        const prev = landmarkHistory[landmarkHistory.length - 2];
+        const curr = landmarkHistory[landmarkHistory.length - 1];
+        const dt = (curr.timestamp - prev.timestamp) / 1000; // بالثواني
+        if (dt <= 0) return;
+
+        // حساب السرعات
+        const leftWristVel = getDistance(curr.leftWrist, prev.leftWrist) / dt;
+        const rightWristVel = getDistance(curr.rightWrist, prev.rightWrist) / dt;
+        const leftElbowAngle = calculateAngle(curr.leftShoulder, curr.leftElbow, curr.leftWrist);
+        const rightElbowAngle = calculateAngle(curr.rightShoulder, curr.rightElbow, curr.rightWrist);
+
+        // عتبات الكشف (يمكن تعديلها)
+        const VELOCITY_THRESHOLD = 0.5; // سرعة المعصم الطبيعية
+        const ELBOW_EXTENSION_THRESHOLD = 100; // الزاوية اللي كتشير للتمديد
+
+        // كشف Jab / Cross
+        if (leftWristVel > VELOCITY_THRESHOLD && leftElbowAngle > ELBOW_EXTENSION_THRESHOLD) {
+            registerPunch('jab');
+        } else if (rightWristVel > VELOCITY_THRESHOLD && rightElbowAngle > ELBOW_EXTENSION_THRESHOLD) {
+            registerPunch('cross');
+        }
+        
+        // كشف Up (Uppercut) - ارتفاع المعصم
+        const leftWristHeight = leftWrist.y;
+        const rightWristHeight = rightWrist.y;
+        const noseY = landmarks[0].y;
+        if (leftWristHeight < noseY && leftWristVel > VELOCITY_THRESHOLD) {
+            registerPunch('up');
+        } else if (rightWristHeight < noseY && rightWristVel > VELOCITY_THRESHOLD) {
+            registerPunch('up');
+        }
+
+        // كشف Cut (Hook) - حركة أفقية
+        const leftHorizontalVel = Math.abs(curr.leftWrist.x - prev.leftWrist.x) / dt;
+        const rightHorizontalVel = Math.abs(curr.rightWrist.x - prev.rightWrist.x) / dt;
+        if (leftHorizontalVel > VELOCITY_THRESHOLD * 1.5) {
+            registerPunch('cut');
+        } else if (rightHorizontalVel > VELOCITY_THRESHOLD * 1.5) {
+            registerPunch('cut');
+        }
+    }
+
+    // --- 9. تسجيل الحركة وتحديث الكومبو ---
+    function registerPunch(punchType) {
+        if (isProcessingPunch) return;
+        isProcessingPunch = true;
+        setTimeout(() => { isProcessingPunch = false; }, 500); // منع التكرار السريع
+
+        const expected = CONFIG.comboSequence[comboIndex];
+        
+        if (punchType === expected) {
+            comboIndex++;
+            updateComboPrompt();
+            if (comboIndex === CONFIG.comboSequence.length) {
+                // الكومبو كامل!
+                playerAttack();
+                comboIndex = 0;
+                updateComboPrompt();
+            }
+        } else {
+            // غلط فـالترتيب
+            comboIndex = 0;
+            updateComboPrompt();
+            messageLog.textContent = `غلط! كان خاصك ${expected}. رجع من الأول.`;
+        }
+    }
+
+    function updateComboPrompt() {
+        let html = '';
+        CONFIG.comboSequence.forEach((move, index) => {
+            const label = move.toUpperCase();
+            const className = index < comboIndex ? 'done' : 'pending';
+            html += `<span class="${className}">${label}</span>`;
+            if (index < CONFIG.comboSequence.length - 1) html += ' → ';
+        });
+        comboPrompt.innerHTML = html;
+    }
+
+    // --- 10. منطق اللعبة (الهجوم والضرر) ---
+    function playerAttack() {
+        const damage = 15 + Math.floor(Math.random() * 10);
+        monsterHP -= damage;
+        if (monsterHP < 0) monsterHP = 0;
+        
+        messageLog.textContent = `💥 ضربة كومبو! دارت ${damage} ضرر.`;
+        monsterImg.style.transform = 'scale(1.2) rotate(5deg)';
+        setTimeout(() => { monsterImg.style.transform = 'scale(1) rotate(0deg)'; }, 200);
+
+        updateHPBars();
+
+        if (monsterHP <= 0) {
+            nextLevel();
+        } else {
+            // الوحش كيرد عليه
+            setTimeout(enemyAttack, 800);
+        }
+    }
+
+    function enemyAttack() {
+        if (gameState !== 'playing') return;
+        const damage = Math.floor(CONFIG.baseMonsterDamage * currentLevel * CONFIG.levelMultiplier);
+        playerHP -= damage;
+        if (playerHP < 0) playerHP = 0;
+        
+        messageLog.textContent = `👹 الوحش هجم عليك! خسرت ${damage} HP.`;
+        updateHPBars();
+
+        if (playerHP <= 0) {
+            gameOver();
+        }
+    }
+
+    function nextLevel() {
+        currentLevel++;
+        playerHP = Math.min(CONFIG.playerMaxHP, playerHP + 20); // شفاء
+        monsterHP = CONFIG.monsterMaxHP;
+        
+        // بدل صورة الوحش
+        const imgIndex = (currentLevel - 1) % CONFIG.monsterImages.length;
+        monsterImg.src = CONFIG.monsterImages[imgIndex];
+        monsterNameSpan.textContent = `وحش مستوى ${currentLevel}`;
+        
+        messageLog.textContent = `🎉 قتلت الوحش! دخلت للمستوى ${currentLevel}.`;
+        updateHPBars();
+    }
+
+    function gameOver() {
+        gameState = 'gameover';
+        messageLog.textContent = '💀 خسرت! دير Start باش تلعب من جديد.';
+        startBtn.textContent = 'إعادة اللعب';
+        startBtn.classList.remove('hidden');
+    }
+
+    function updateHPBars() {
+        const playerPercent = (playerHP / CONFIG.playerMaxHP) * 100;
+        const monsterPercent = (monsterHP / CONFIG.monsterMaxHP) * 100;
+        playerHpBar.style.width = `${playerPercent}%`;
+        monsterHpBar.style.width = `${monsterPercent}%`;
+        playerHpText.textContent = Math.max(0, playerHP);
+        monsterHpText.textContent = Math.max(0, monsterHP);
+    }
+
+    // --- 11. بدء اللعب ---
+    startBtn.addEventListener('click', async () => {
+        if (!poseLandmarker) {
+            messageLog.textContent = 'كنحملو الموديل... عافاك تسنى شوية.';
+            await initMediaPipe();
+        }
+        
+        // إعادة تعيين الحالة
+        gameState = 'playing';
+        playerHP = CONFIG.playerMaxHP;
+        monsterHP = CONFIG.monsterMaxHP;
+        currentLevel = 1;
+        comboIndex = 0;
+        landmarkHistory = [];
+        
+        monsterImg.src = CONFIG.monsterImages[0];
+        monsterNameSpan.textContent = 'وحش مستوى 1';
+        
+        updateHPBars();
+        updateComboPrompt();
+        messageLog.textContent = 'دابا ضرب بالترتيب اللي كيبان فوق!';
+        startBtn.classList.add('hidden');
+
+        await startCamera();
+    });
+
+    // رسم أولي
+    updateComboPrompt();
+</script>
+</body>
+</html>
